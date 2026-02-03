@@ -1,0 +1,21 @@
+services:
+  rocm-strix:
+    build: .
+    image: rocm-strix:latest
+    container_name: rocm-strix
+    privileged: true
+    restart: unless-stopped
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri:/dev/dri"
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    volumes:
+      - ./workspace:/workspace
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+      - HIP_VISIBLE_DEVICES=0
+    ipc: host
+    security_opt:
+      - seccomp:unconfined
