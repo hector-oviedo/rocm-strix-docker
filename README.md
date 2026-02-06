@@ -7,12 +7,9 @@ Docker infrastructure for AMD Strix Halo (RDNA 3.5 / gfx1151) with ROCm PyTorch 
 ```
 .
 ├── .env                      # Environment variables (VIDEO_GID, RENDER_GID)
-├── .env.template             # Template for environment variables
-├── .gitignore                # Git ignore rules
 ├── Dockerfile                # Base ROCm PyTorch container
 ├── docker-compose.yml        # Docker Compose configuration
 ├── entrypoint.sh             # Base container entrypoint
-├── llm.txt                   # Complete technical reference
 ├── ollama/                   # Ollama LLM service
 │   ├── Dockerfile            # Ollama ROCm container
 │   └── entrypoint.sh         # Ollama auto-model loader entrypoint
@@ -29,12 +26,16 @@ getent group video | cut -d: -f3
 getent group render | cut -d: -f3
 ```
 
-### 2. Configure Environment
+### 2. Create .env File
+
+Create `.env` in the project root with your numeric GIDs:
 
 ```bash
-cp .env.template .env
-# Edit .env with your numeric GIDs (NOT group names)
+VIDEO_GID=44
+RENDER_GID=991
 ```
+
+**Important:** Use numeric GIDs, NOT group names (`video`, `render`).
 
 ### 3. Build & Run
 
@@ -92,18 +93,3 @@ curl http://localhost:11434/api/generate -d '{
 - Ubuntu 25.04+ host (Kernel 6.12+)
 - AMD Ryzen AI Max (Strix Halo)
 - Docker with compose plugin
-
-## Environment Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `VIDEO_GID` | Numeric GID of video group | `44` |
-| `RENDER_GID` | Numeric GID of render group | `991` |
-| `HSA_OVERRIDE_GFX_VERSION` | GPU architecture override | `11.5.1` |
-| `HIP_VISIBLE_DEVICES` | Visible GPU devices | `0` |
-
-## Notes
-
-- Use **numeric GIDs** in `.env`, not group names (`video`, `render`)
-- The `workspace/` folder is mounted at `/workspace` in the base container
-- Ollama container exposes port `11434` for API access

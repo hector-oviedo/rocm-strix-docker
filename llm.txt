@@ -24,8 +24,6 @@ These are DIFFERENT metrics. 7.11 is the actual ROCm stack version.
 ```
 .
 ├── .env                      # Environment variables (VIDEO_GID, RENDER_GID)
-├── .env.template             # Template for environment variables
-├── .gitignore                # Git ignore rules (excludes .env)
 ├── Dockerfile                # Base ROCm PyTorch container
 ├── docker-compose.yml        # Docker Compose configuration
 ├── entrypoint.sh             # Base container entrypoint
@@ -37,28 +35,18 @@ These are DIFFERENT metrics. 7.11 is the actual ROCm stack version.
 └── workspace/                # Mounted volume for persistent data
 ```
 
-## Required Environment Variables
+## Environment Variables
 
-MUST be numeric GIDs, NOT group names:
+Create `.env` file with numeric GIDs (NOT group names):
+
 ```
 VIDEO_GID=44      # From: getent group video | cut -d: -f3
 RENDER_GID=991    # From: getent group render | cut -d: -f3
 ```
 
-String group names (video, render) DO NOT WORK in Docker Compose group_add.
+String group names fail silently in Docker Compose `group_add`.
 
-## Files
-
-### .gitignore
-```
-.env
-```
-
-### .env.template
-```
-VIDEO_GID=
-RENDER_GID=
-```
+## Core Files
 
 ### Dockerfile (Base Container)
 ```dockerfile
@@ -92,31 +80,6 @@ ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "-c", "import time; print('ROCm container ready. Use docker exec to run commands.'); time.sleep(86400)"]
 ```
 
-### docker-compose.yml
-```yaml
-services:
-  rocm-strix:
-    build: .
-    image: rocm-strix:latest
-    container_name: rocm-strix
-    privileged: true
-    restart: unless-stopped
-    devices:
-      - "/dev/kfd:/dev/kfd"
-      - "/dev/dri:/dev/dri"
-    group_add:
-      - "${VIDEO_GID}"
-      - "${RENDER_GID}"
-    volumes:
-      - ./workspace:/workspace
-    environment:
-      - HSA_OVERRIDE_GFX_VERSION=11.5.1
-      - HIP_VISIBLE_DEVICES=0
-    ipc: host
-    security_opt:
-      - seccomp:unconfined
-```
-
 ### entrypoint.sh (Base Container)
 ```bash
 #!/bin/bash
@@ -142,6 +105,31 @@ else:
 
 echo "[INFO] GPU check passed. Container ready."
 exec "$@"
+```
+
+### docker-compose.yml
+```yaml
+services:
+  rocm-strix:
+    build: .
+    image: rocm-strix:latest
+    container_name: rocm-strix
+    privileged: true
+    restart: unless-stopped
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri:/dev/dri"
+    group_add:
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
+    volumes:
+      - ./workspace:/workspace
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+      - HIP_VISIBLE_DEVICES=0
+    ipc: host
+    security_opt:
+      - seccomp:unconfined
 ```
 
 ### ollama/Dockerfile
@@ -269,12 +257,15 @@ wait $OLLAMA_PID
 ## Build & Run
 
 ### Base Container
+
 ```bash
 # 1. Get your GIDs
 getent group video | cut -d: -f3
 getent group render | cut -d: -f3
 
-# 2. Fill .env with numeric values (NOT "video" or "render")
+# 2. Create .env with numeric values (NOT "video" or "render")
+# VIDEO_GID=44
+# RENDER_GID=991
 
 # 3. Build and start
 docker compose up -d --build
@@ -285,6 +276,7 @@ docker exec rocm-strix python -c "import torch; print(torch.cuda.get_device_name
 ```
 
 ### Ollama Service
+
 ```bash
 cd ollama
 docker build -t ollama-strix .
@@ -300,9 +292,10 @@ docker run -d --name ollama-strix \
   ollama-strix
 ```
 
-## Test Output (Working)
+## Test Output
 
 ### Base Container
+
 ```
 === ROCm Strix Container ===
 [INFO] Checking GPU...
@@ -313,6 +306,7 @@ ROCm: 7.2.53150-7b886380f9
 ```
 
 ### Ollama Container
+
 ```
 [ollama] ========================================
 [ollama] Model: gpt-oss:20b
@@ -342,19 +336,17 @@ ROCm: 7.2.53150-7b886380f9
 ## Verification Commands
 
 ### Base Container
+
 ```bash
-# Inside container
 python -c "import torch; print(torch.__version__)"  # 2.9.1+rocm7.11.0rc1
 python -c "import torch; print(torch.version.hip)"  # 7.2.x (HIP runtime)
 python -c "import torch; print(torch.cuda.is_available())"  # True
 ```
 
 ### Ollama Container
-```bash
-# Check Ollama API
-curl http://localhost:11434/api/tags
 
-# Generate text
+```bash
+curl http://localhost:11434/api/tags
 curl http://localhost:11434/api/generate -d '{
   "model": "gpt-oss:20b",
   "prompt": "Hello!"
