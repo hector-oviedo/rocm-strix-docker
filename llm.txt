@@ -2,53 +2,94 @@
 
 Docker infrastructure for AMD Strix Halo (RDNA 3.5 / gfx1151) with ROCm PyTorch and Ollama LLM support.
 
+Two independent services in separate folders. They share nothing — each has its own Dockerfile, docker-compose.yml, and entrypoint. Only the ollama service needs a `.env` file.
+
 ## Problem Solved
 
 Standard containers fail on Strix Halo because:
-1. Missing gfx1151 support in stable ROCm
-2. Ubuntu Rolling ships Python 3.13 (PyTorch doesn't support it)
-3. Debian pip silently falls back to CPU wheels
+1. Missing gfx1151 support in stable ROCm — only prerelease wheels include it
+2. Ubuntu Rolling ships Python 3.13, but PyTorch ROCm gfx1151 wheels only target Python 3.12
+3. System pip on Debian/Ubuntu silently falls back to CPU-only wheels when GPU wheels aren't found
 
-Solution: Ubuntu Rolling (driver compatibility) + UV (Python 3.12 isolation) + ROCm preview wheels.
+Solution: Ubuntu Rolling (for kernel/driver compatibility) + UV with Python 3.12 venv (bypasses system Python 3.13) + AMD prerelease ROCm wheels built for gfx1151. No pip is installed — UV handles all package management.
 
-## Version Clarification
+## Verified Versions (tested Feb 2026)
 
-- **PyTorch/ROCm Package**: 7.11.0rc1 (latest TheRock-based preview)
-- **HIP Runtime**: 7.2.x (lower-level driver interface, shown in `torch.version.hip`)
-- **torch.__version__**: 2.9.1+rocm7.11.0rc1
+| Component | Version | Notes |
+|-----------|---------|-------|
+| Ubuntu (base image) | 25.10 (rolling) | `ubuntu:rolling` |
+| Python | 3.12.12 | Installed by UV, not system Python |
+| UV | 0.10.0 | From `ghcr.io/astral-sh/uv:latest` |
+| PyTorch | 2.9.1+rocm7.11.0rc1 | Prerelease gfx1151 wheel |
+| HIP Runtime | 7.2.53150 | Lower-level driver interface (`torch.version.hip`) |
+| Ollama | 0.15.5 | From `ollama/ollama:rocm` |
+| GPU | Radeon 8060S | 109.5 GB VRAM reported by PyTorch |
 
-These are DIFFERENT metrics. 7.11 is the actual ROCm stack version.
+Note: `torch.__version__` says `2.9.1+rocm7.11.0rc1` but `torch.version.hip` says `7.2.x`. These are different metrics — 7.11 is the ROCm package version, 7.2 is the HIP runtime version.
 
 ## Project Structure
 
 ```
 .
-├── .env                      # Environment variables (VIDEO_GID, RENDER_GID)
-├── Dockerfile                # Base ROCm PyTorch container
-├── docker-compose.yml        # Docker Compose configuration
-├── entrypoint.sh             # Base container entrypoint
-├── llm.txt                   # This complete reference
-├── ollama/                   # Ollama LLM service
-│   ├── Dockerfile            # Ollama ROCm container
-│   └── entrypoint.sh         # Ollama auto-model loader entrypoint
-├── README.md                 # User documentation
-└── workspace/                # Mounted volume for persistent data
+├── .gitignore                    # Ignores all .env files across the repo
+├── README.md                     # User-facing documentation
+├── llm.txt                       # This complete technical reference
+├── rocm/                         # ROCm PyTorch container (independent)
+│   ├── Dockerfile                # Ubuntu Rolling + UV + PyTorch ROCm
+│   ├── docker-compose.yml        # Compose config — no .env needed
+│   └── entrypoint.sh             # GPU detection check on startup
+└── ollama/                       # Ollama LLM service (independent)
+    ├── .env                      # Local config — git-ignored, machine-specific
+    ├── .env.template             # Committed template users copy to .env
+    ├── Dockerfile                # ollama/ollama:rocm + custom entrypoint
+    ├── docker-compose.yml        # Compose config — reads from .env
+    └── entrypoint.sh             # Server start + auto model download
 ```
+
+## .gitignore
+
+```
+.env
+```
+
+The `.gitignore` contains a single line: `.env`. In git, a pattern without a leading slash matches files with that name in **any directory**. So this single line ignores:
+- `ollama/.env`
+- Any future `.env` in any subfolder
+
+This is intentional. The `.env` files contain machine-specific values (host paths) that differ per system. The `.env.template` file IS committed — it serves as the starting point. Users copy it to `.env` and fill in their values.
+
+The `rocm/` service has no `.env` file — its compose file has no configurable variables. Everything is hardcoded.
 
 ## Environment Variables
 
-Create `.env` file with numeric GIDs (NOT group names):
+### rocm/ — No .env needed
+
+The `rocm/docker-compose.yml` has all values hardcoded. No `.env` file exists or is needed. Just run `docker compose up -d --build`.
+
+### ollama/.env
+
+Read by `ollama/docker-compose.yml` automatically (Docker Compose loads `.env` from the same directory as the compose file).
 
 ```
-VIDEO_GID=44      # From: getent group video | cut -d: -f3
-RENDER_GID=991    # From: getent group render | cut -d: -f3
+OLLAMA_MODELS_DIR=/home/hector/models/ollama  # Host path where models are stored
+OLLAMA_MODEL=gpt-oss:20b                      # Model to auto-download on first start
+OLLAMA_CONTEXT_LENGTH=8192                    # Context window size in tokens
+OLLAMA_KEEP_ALIVE=5m                          # How long model stays loaded in VRAM
 ```
 
-String group names fail silently in Docker Compose `group_add`.
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OLLAMA_MODELS_DIR` | Yes | — | Absolute path on host for model storage. Directory must exist before starting the container. Multiple ollama instances can share the same path to avoid re-downloading models. Mounted to `/ollama-models` inside the container. |
+| `OLLAMA_MODEL` | No | `gpt-oss:20b` | Which model to pull on first start |
+| `OLLAMA_CONTEXT_LENGTH` | No | `8192` | Context window in tokens. Common values: 4096, 8192, 16384, 32768, 65536, 131072. Higher values use more VRAM. |
+| `OLLAMA_KEEP_ALIVE` | No | `5m` | Duration model stays in VRAM after last request. Use `5m`, `1h`, or `-1` for forever. |
 
-## Core Files
+## Core Files — Exact Content
 
-### Dockerfile (Base Container)
+Every file below is the exact content on disk. Nothing is paraphrased.
+
+### rocm/Dockerfile
+
 ```dockerfile
 FROM ubuntu:rolling
 
@@ -59,7 +100,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip \
+    python3 \
     libgl1 libglib2.0-0 libgomp1 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -77,10 +118,21 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "-c", "import time; print('ROCm container ready. Use docker exec to run commands.'); time.sleep(86400)"]
+CMD ["python3", "-c", "import time; print('ROCm container ready. Use docker exec to run commands.'); time.sleep(86400)"]
 ```
 
-### entrypoint.sh (Base Container)
+Key decisions:
+- **No `python3-pip`**: UV handles all package management. pip is not installed, not needed.
+- **`ubuntu:rolling`**: Required for Strix Halo kernel/driver compatibility. Currently points to 25.10.
+- **`uv venv .venv --python 3.12`**: UV downloads and installs Python 3.12 itself — the system Python 3.13 from Ubuntu is bypassed entirely.
+- **`--pre` flag**: Required because the gfx1151 wheels on the prerelease index are marked as pre-release.
+- **`--index-url`**: Points to AMD's gfx1151-specific prerelease wheel index. A stable index also exists at `https://repo.amd.com/rocm/whl/gfx1151/` (ships rocm7.10.0 instead of 7.11.0rc1).
+- **`HSA_OVERRIDE_GFX_VERSION=11.5.1`**: Tells the ROCm stack to treat this GPU as gfx1151. Without it, ROCm doesn't recognize Strix Halo.
+- **`VIRTUAL_ENV` + `PATH`**: Ensures the venv's `python3` is used everywhere, not the system one.
+- **Default CMD**: Sleeps 24h. Container is designed for `docker exec` usage.
+
+### rocm/entrypoint.sh
+
 ```bash
 #!/bin/bash
 set -e
@@ -107,7 +159,10 @@ echo "[INFO] GPU check passed. Container ready."
 exec "$@"
 ```
 
-### docker-compose.yml
+On startup: checks `HSA_OVERRIDE_GFX_VERSION` is set, runs a PyTorch GPU detection test, and if the GPU is found, hands off to the CMD via `exec "$@"`. If no GPU is detected, the container exits with error.
+
+### rocm/docker-compose.yml
+
 ```yaml
 services:
   rocm-strix:
@@ -116,23 +171,19 @@ services:
     container_name: rocm-strix
     privileged: true
     restart: unless-stopped
-    devices:
-      - "/dev/kfd:/dev/kfd"
-      - "/dev/dri:/dev/dri"
-    group_add:
-      - "${VIDEO_GID}"
-      - "${RENDER_GID}"
-    volumes:
-      - ./workspace:/workspace
     environment:
       - HSA_OVERRIDE_GFX_VERSION=11.5.1
       - HIP_VISIBLE_DEVICES=0
     ipc: host
-    security_opt:
-      - seccomp:unconfined
 ```
 
+- **`privileged: true`**: Grants full device access including `/dev/kfd` (AMD Kernel Fusion Driver) and `/dev/dri` (Direct Rendering). Required for GPU compute on Strix Halo. Makes explicit `devices`, `group_add`, and `security_opt` settings unnecessary.
+- **`ipc: host`**: Shared memory for PyTorch inter-process communication.
+- **`HIP_VISIBLE_DEVICES=0`**: Limits to the first GPU.
+- **No `.env` variables**: Everything is hardcoded. No configuration needed.
+
 ### ollama/Dockerfile
+
 ```dockerfile
 # =============================================================================
 # Ollama Service - ROCm with Auto-Model Download
@@ -150,6 +201,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Default model to auto-download (can be overridden)
 ENV OLLAMA_MODEL=gpt-oss:20b \
     OLLAMA_HOST=0.0.0.0:11434 \
+    OLLAMA_CONTEXT_LENGTH=8192 \
+    OLLAMA_FLASH_ATTENTION=1 \
+    OLLAMA_KV_CACHE_TYPE=q8_0 \
+    OLLAMA_KEEP_ALIVE=5m \
     OLLAMA_NUM_PARALLEL=1 \
     OLLAMA_MAX_LOADED_MODELS=1 \
     HSA_OVERRIDE_GFX_VERSION=11.5.1 \
@@ -171,7 +226,20 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 ```
 
+Key decisions:
+- **`ollama/ollama:rocm`**: Official Ollama image with ROCm support baked in.
+- **`OLLAMA_FLASH_ATTENTION=1`**: Enables flash attention — faster inference and required for KV cache quantization.
+- **`OLLAMA_KV_CACHE_TYPE=q8_0`**: Quantizes the KV cache to 8-bit, halving its VRAM usage with negligible quality loss. This effectively doubles usable context length for the same VRAM budget. Requires flash attention enabled.
+- **`OLLAMA_CONTEXT_LENGTH=8192`**: Default context window. Overridden by docker-compose from .env.
+- **`OLLAMA_KEEP_ALIVE=5m`**: Model unloaded from VRAM after 5 minutes of inactivity.
+- **`AMD_SERIALIZE_KERNEL=1`**: Serializes kernel dispatch for stability on AMD GPUs.
+- **`OLLAMA_NUM_PARALLEL=1`** and **`OLLAMA_MAX_LOADED_MODELS=1`**: Conservative defaults — one request at a time, one model in memory.
+- **`procps`**: Provides `ps` for debugging inside the container.
+- **HEALTHCHECK**: Runs `ollama list` every 30s. Start period is 60s to allow for initial model download.
+- ENV values in the Dockerfile serve as defaults. The docker-compose.yml environment section overrides them at runtime.
+
 ### ollama/entrypoint.sh
+
 ```bash
 #!/bin/bash
 set -e
@@ -254,47 +322,82 @@ log "========================================"
 wait $OLLAMA_PID
 ```
 
+Flow: starts ollama server in background → polls TCP port 11434 for up to 60 seconds → checks if model exists → downloads if missing → verifies → waits on the server PID to keep container alive. Traps SIGTERM/SIGINT for graceful shutdown.
+
+### ollama/docker-compose.yml
+
+```yaml
+services:
+  ollama:
+    build: .
+    image: ollama-strix:latest
+    container_name: ollama-strix
+    privileged: true
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ${OLLAMA_MODELS_DIR}:/ollama-models
+    environment:
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gpt-oss:20b}
+      - OLLAMA_MODELS=/ollama-models
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-8192}
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+      - HIP_VISIBLE_DEVICES=0
+      - AMD_SERIALIZE_KERNEL=1
+    ipc: host
+```
+
+- **`privileged: true`**: Grants full device access including `/dev/kfd` and `/dev/dri`. Makes explicit `devices`, `group_add`, and `security_opt` unnecessary.
+- **`${OLLAMA_MODELS_DIR}:/ollama-models`**: Bind-mounts the host directory from `.env` into the container at `/ollama-models`. The `OLLAMA_MODELS=/ollama-models` env var tells the Ollama server to use that path for model storage instead of the default `/root/.ollama/models`.
+- **`${OLLAMA_MODEL:-gpt-oss:20b}`**: Reads model name from .env, falls back to `gpt-oss:20b`.
+- **`${OLLAMA_CONTEXT_LENGTH:-8192}`** and **`${OLLAMA_KEEP_ALIVE:-5m}`**: Configurable from .env with defaults.
+- **`OLLAMA_FLASH_ATTENTION=1`** and **`OLLAMA_KV_CACHE_TYPE=q8_0`**: Always enabled (hardcoded in compose, not configurable from .env — these are performance optimizations that should always be on).
+- **Port 11434**: Ollama API endpoint exposed to host.
+
+### ollama/.env.template
+
+```
+OLLAMA_MODELS_DIR=
+OLLAMA_MODEL=gpt-oss:20b
+OLLAMA_CONTEXT_LENGTH=8192
+OLLAMA_KEEP_ALIVE=5m
+```
+
 ## Build & Run
 
-### Base Container
+### ROCm Container
 
 ```bash
-# 1. Get your GIDs
-getent group video | cut -d: -f3
-getent group render | cut -d: -f3
-
-# 2. Create .env with numeric values (NOT "video" or "render")
-# VIDEO_GID=44
-# RENDER_GID=991
-
-# 3. Build and start
+cd rocm
 docker compose up -d --build
-
-# 4. Verify GPU detection
 docker logs rocm-strix
-docker exec rocm-strix python -c "import torch; print(torch.cuda.get_device_name(0))"
+docker exec rocm-strix python3 -c "import torch; print(torch.cuda.get_device_name(0))"
 ```
+
+No configuration needed.
 
 ### Ollama Service
 
 ```bash
 cd ollama
-docker build -t ollama-strix .
-docker run -d --name ollama-strix \
-  --privileged \
-  --device /dev/kfd \
-  --device /dev/dri \
-  -p 11434:11434 \
-  -e VIDEO_GID=44 \
-  -e RENDER_GID=991 \
-  -e HSA_OVERRIDE_GFX_VERSION=11.5.1 \
-  -e HIP_VISIBLE_DEVICES=0 \
-  ollama-strix
+cp .env.template .env
+# Edit .env — set OLLAMA_MODELS_DIR to a host path
+
+mkdir -p /home/hector/models/ollama   # or whatever path you set
+docker compose up -d --build
+docker logs ollama-strix
 ```
 
-## Test Output
+## Verified Test Output
 
-### Base Container
+### ROCm Container
 
 ```
 === ROCm Strix Container ===
@@ -323,32 +426,44 @@ ROCm: 7.2.53150-7b886380f9
 [ollama] ========================================
 ```
 
+### Inference Test
+
+```bash
+curl -s http://localhost:11434/api/generate -d '{"model":"gpt-oss:20b","prompt":"What is 2+2?","stream":false}'
+```
+
+Response includes `"response":"2 + 2 equals 4."` — GPU-accelerated at ~50 tokens/sec.
+
 ## Key Technical Details
 
-- **Index URL**: https://rocm.prereleases.amd.com/whl/gfx1151/ (required for gfx1151)
-- **HSA_OVERRIDE_GFX_VERSION**: Must be 11.5.1 for Strix Halo
-- **group_add**: Requires numeric GIDs, string names fail silently
-- **devices**: /dev/kfd and /dev/dri required for GPU access
-- **privileged**: Required for proper GPU permissions
-- **Ollama Port**: 11434 (API endpoint)
-- **Default Model**: gpt-oss:20b (~13.8GB download)
+- **Wheel Index**: `https://rocm.prereleases.amd.com/whl/gfx1151/` (prerelease, rocm7.11.0rc1). A stable alternative exists at `https://repo.amd.com/rocm/whl/gfx1151/` (rocm7.10.0).
+- **HSA_OVERRIDE_GFX_VERSION**: Must be `11.5.1` for Strix Halo. Without it, ROCm does not recognize the GPU.
+- **privileged mode**: Both containers use `privileged: true` which grants full device access (`/dev/kfd`, `/dev/dri`) and all capabilities. This makes explicit `devices`, `group_add`, and `security_opt` settings unnecessary.
+- **No pip**: UV handles all Python package management. `python3-pip` is not installed.
+- **OLLAMA_FLASH_ATTENTION + OLLAMA_KV_CACHE_TYPE=q8_0**: Enabled together — flash attention is a prerequisite for KV cache quantization. q8_0 halves KV cache VRAM usage with negligible quality impact.
+- **OLLAMA_CONTEXT_LENGTH**: Default 8192. With 103 GiB VRAM and q8_0 KV cache, values up to 131072 are feasible.
+- **OLLAMA_MODELS_DIR**: Host bind-mount for model persistence. Models survive container rebuilds. Multiple instances sharing the same path reuse downloaded models.
+- **Ollama API**: Port 11434. Use `/api/generate` for completions, `/api/tags` to list models.
 
 ## Verification Commands
 
-### Base Container
+### ROCm Container
 
 ```bash
-python -c "import torch; print(torch.__version__)"  # 2.9.1+rocm7.11.0rc1
-python -c "import torch; print(torch.version.hip)"  # 7.2.x (HIP runtime)
-python -c "import torch; print(torch.cuda.is_available())"  # True
+docker exec rocm-strix python3 -c "import torch; print(torch.__version__)"         # 2.9.1+rocm7.11.0rc1
+docker exec rocm-strix python3 -c "import torch; print(torch.version.hip)"         # 7.2.53150-7b886380f9
+docker exec rocm-strix python3 -c "import torch; print(torch.cuda.is_available())" # True
+docker exec rocm-strix python3 -c "import torch; print(torch.cuda.get_device_name(0))" # Radeon 8060S Graphics
+docker exec rocm-strix uv --version                                                 # uv 0.10.0
 ```
 
 ### Ollama Container
 
 ```bash
-curl http://localhost:11434/api/tags
-curl http://localhost:11434/api/generate -d '{
+curl -s http://localhost:11434/api/tags                        # List loaded models
+curl -s http://localhost:11434/api/generate -d '{
   "model": "gpt-oss:20b",
-  "prompt": "Hello!"
+  "prompt": "Hello!",
+  "stream": false
 }'
 ```

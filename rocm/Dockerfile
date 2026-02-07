@@ -7,7 +7,7 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip \
+    python3 \
     libgl1 libglib2.0-0 libgomp1 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -25,4 +25,4 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python", "-c", "import time; print('ROCm container ready. Use docker exec to run commands.'); time.sleep(86400)"]
+CMD ["python3", "-c", "import time; print('ROCm container ready. Use docker exec to run commands.'); time.sleep(86400)"]
